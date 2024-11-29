@@ -1,8 +1,20 @@
 pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // read file
     let contents = std::fs::read_to_string(config.path)?;
-    println!("With text:\n{}", contents);
 
+    let result  = if config.case_sensitive {
+        Config::search_case_sensitive(&config.target, &contents)
+    } else {
+        Config::search_case_insensitive(&config.target, &contents)
+    };
+
+    for (_, line) in result.iter().enumerate() {
+        if config.show_line_number {
+            println!("{}: {}", line.0 +1, line.1);
+        } else {
+            println!("{}", line.1);
+        }
+    }
     // search
     // print
     Ok(())
@@ -13,6 +25,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 pub struct Config {
     target: String,
     path: String,
+    show_line_number: bool,
+    case_sensitive: bool,
 }
 
 // imple config new method
@@ -25,19 +39,23 @@ impl Config {
 
         let target = args[1].clone();
         let path = args[2].clone();
+        let show_line_number = args.contains(&String::from("-n"));
+        let case_sensitive = args.contains(&String::from("-s"));
         
-        Ok(Config { target, path })
+        Ok(Config { target, path, show_line_number, case_sensitive })
     }
-  pub fn search_case_insensitive<'a>(query: &str, contents: &'a str) -> Vec<&'a str> {
+  pub fn search_case_insensitive<'a>(query: &str, contents: &'a str) -> Vec<(usize, &'a str)> {
 
     contents.lines()
-        .filter(|line| line.to_lowercase().contains(&query.to_lowercase()))
-        .collect()
+    .enumerate()
+    .filter(|(_, line)| line.to_lowercase().contains(&query.to_lowercase()))
+    .collect()
   }    
-  pub fn search_case_sensitive<'a>(query: &str, contents: &'a str) -> Vec<&'a str> {
+  pub fn search_case_sensitive<'a>(query: &str, contents: &'a str) -> Vec<(usize, &'a str)> {
     contents.lines()
-        .filter(|line| line.contains(query))
-        .collect()
+    .enumerate()
+    .filter(|(_, line)| line.contains(&query))
+    .collect()
 }
 }
 
@@ -76,8 +94,8 @@ safe, fast, productive.
 Pick three.
 Duct tape.";
         assert_eq!(
-            vec!["safe, fast, productive."],
-            Config::search_case_insensitive(query, contents)
+            vec![(2, "safe, fast, productive.")],
+            Config::search_case_sensitive(query, contents)
         );
         
         }
@@ -91,9 +109,10 @@ safe, fast, productive.
 Pick three.
 Trust me.";
         assert_eq!(
-            vec!["Rust:", "Trust me."],
+            vec![(0, "Rust:"), (3, "Trust me.")],
             Config::search_case_insensitive(query, contents)
         );
     }
+
 
 }
