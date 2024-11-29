@@ -2,8 +2,9 @@ use  clap::Parser;
 
 #[derive(Parser)]
 struct Args{
-    files: Vec<String>
-    
+    files: Vec<String>,
+    #[arg(short = 'n', long="number", help = "Show line number")]
+    show_line_number: bool,
 }
 fn main() {
     println!("Hello, world!");
@@ -20,7 +21,11 @@ fn run (args: Args) -> Result<(), Box<dyn std::error::Error>>{
     for file in args.files{
         let content = std::fs::read_to_string(&file)?;
         for line in content.lines(){
+            if args.show_line_number{
             println!("{:4}: {}", line_num, line);
+            }else{
+                   println!("{}", line);               
+             }
             line_num += 1;
         }
     }
