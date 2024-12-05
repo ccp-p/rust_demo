@@ -16,18 +16,29 @@ fn main() {
 }
 
 fn run (args: Args) -> Result<(), Box<dyn std::error::Error>>{
-    let mut line_num = 1;
-
-    for file in args.files{
-        let content = std::fs::read_to_string(&file)?;
-        for line in content.lines(){
-            if args.show_line_number{
-            println!("{:4}: {}", line_num, line);
-            }else{
-                   println!("{}", line);               
-             }
-            line_num += 1;
-        }
+    args.files.iter().try_for_each(|file| {
+        let content = std::fs::read_to_string(file)?;
+        content.lines().enumerate().for_each(|(index, line)| {
+            if args.show_line_number {
+                println!("{:4}: {}", index + 1, line);
+            } else {
+                println!("{}", line);
+            }
+        });
+        Ok(())
+    })
+}
+// test
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_run() {
+        let args = Args {
+            files: vec!["./src/main.rs".to_string()],
+            show_line_number: true,
+        };
+        
+        assert!(run(args).is_ok());
     }
-    Ok(())
 }
