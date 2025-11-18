@@ -1,0 +1,67 @@
+ # 编译输出
+/target/
+**/target/
+
+# Rust 编译文件
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+desktop.ini
+
+# 日志
+*.log
+logs/
+*.out
+
+# 构建文件
+**/build/
+**/dist/
+**/node_modules/
+
+# 本地配置文件
+**/*.config.json
+**/version.config.json
+**/.env
+**/.env.local
+**/.env.development.local
+**/.env.test.local
+**/.env.production.local
+
+# 临时文件
+**/tmp/
+**/temp/
+**/tmp/**
+**/temp/**
+
+# 编辑器备份文件
+*~
+**/*~
+**/.*~
+
+# 生成的版本映射文件
+.version-map.json
+
+# 测试文件
+**/test/**
+**/tests/**
+**/*.test.*
+
+# 依赖缓存
+**/Cargo.lock
+**/vendor/
+
+# 系统文件
+**/System Volume Information/
+**/hiberfil.sys
+**/pagefile.sys
+**/swapfile

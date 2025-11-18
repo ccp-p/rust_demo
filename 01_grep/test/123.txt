@@ -1,6 +1,14 @@
-12312
-123
-123
-123
-abc
-Abc
+【通用】
+苹果17 单点链接：https://wx.10086.cn/website/sso/netUni?netUniBackUrl=https%3A%2F%2Fwx.10086.cn%2Fwebsite%2FbusinessOnline%2FshopDetail%3FproductCode%3D2025090916365395401379458&net_token=移动认证
+苹果17 ：promax  单点链接：https://wx.10086.cn/website/sso/netUni?netUniBackUrl=https%3A%2F%2Fwx.10086.cn%2Fwebsite%2FbusinessOnline%2FshopDetail%3FproductCode%3D2025090916421534801379605&net_token=移动认证
+
+【广东】
+苹果17单点链接：https：https://gd.10086.cn/gdshop/qdxsd/index.html#/pageC/zdGoodsDetails/index?id=1967476646349086720&orderSource=1378&appletType=XDR&token=移动认证
+苹果17promax单点链接：https：https://gd.10086.cn/gdshop/qdxsd/index.html#/pageC/zdGoodsDetails/index?id=1967481676472999936&orderSource=1378&appletType=XDR&token=移动认证
+
+【福建】
+iPhone 17单点链接：https https://wx.10086.cn/website/sso/netUni?netUniBackUrl=https%3A%2F%2Fwx.10086.cn%2Fwebsite%2FbusinessOnline%2FcontractPhone%3FactivityId%3D200024335&net_token=移动认证
+
+iPhone 17 Pro Max单点链接：https：https://wx.10086.cn/website/sso/netUni?netUniBackUrl=https%3A%2F%2Fwx.10086.cn%2Fwebsite%2FbusinessOnline%2FcontractPhone%3FactivityId%3D200024337&net_token=移动认证
+
+ 手机购广东、福建，user

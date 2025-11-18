@@ -1,0 +1,19 @@
+[package]
+name = "version-manager"
+version = "0.1.0"
+edition = "2021"
+
+# 直接使用当前目录的 main.rs 作为可执行入口，避免移动文件
+[[bin]]
+name = "version-manager"
+path = "main.rs"
+
+[dependencies]
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 代码使用的是 clap v3 的属性风格（#[clap(...)]）
+clap = { version = "3.2", features = ["derive"] }
+walkdir = "2.5"
+md5 = "0.7"
+pathdiff = "0.2"
