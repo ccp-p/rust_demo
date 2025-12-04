@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use clap::Parser;
+use std::time::Instant; // 用于计时
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,17 +17,19 @@ struct Config {
     #[serde(default = "default_hash_length")]
     hash_length: usize,
     #[serde(default)]
-    single_html_file: String,
+    single_html_file: String, // 单个HTML文件路径
     #[serde(default)]
     html_files: Vec<String>,
     #[serde(default = "default_exclude_dirs")]
     exclude_dirs: Vec<String>,
     #[serde(default)]
-    home_html_file: String,
+    home_html_file: String,    // 家里电脑的HTML文件路径
     #[serde(default)]
-    company_html_file: String,
+    company_html_file: String, // 公司电脑的HTML文件路径
     #[serde(default)]
-    include_components: Vec<String>,
+    include_components: Vec<String>, // 只处理指定的组件
+    #[serde(default)]
+    process_main_resources: Vec<String>, // 指定哪些HTML文件需要处理主资源
 }
 
 fn default_root_dir() -> String { ".".to_string() }
@@ -50,7 +53,7 @@ struct ImageReference {
 
 struct VersionManager {
     config: Config,
-    version_map: Arc<Mutex<HashMap<String, String>>>,
+    // 移除了 version_map
     processed_files: Arc<Mutex<HashMap<String, bool>>>,
     debug_mode: bool,
 }
@@ -58,7 +61,6 @@ struct VersionManager {
 impl VersionManager {
     fn new(config: Config, debug_mode: bool) -> Self {
         VersionManager {
-            version_map: Arc::new(Mutex::new(HashMap::new())),
             processed_files: Arc::new(Mutex::new(HashMap::new())),
             config,
             debug_mode,
@@ -75,8 +77,9 @@ impl VersionManager {
                component_path.contains(&format!("\\{}\\", component_name)) ||
                component_path.ends_with(&format!("/{}", component_name)) ||
                component_path.ends_with(&format!("\\{}", component_name)) ||
-               std::path::Path::new(component_path).file_stem()
-                   .map(|s| s.to_string_lossy().starts_with(&format!("{}.0", component_name))) // 假设文件名格式
+               std::path::Path::new(component_path)
+                   .file_name()
+                   .map(|f| f.to_string_lossy().starts_with(&format!("{}.0", component_name))) // 假设文件名格式为 component.ext
                    .unwrap_or(false) {
                 return true;
             }
@@ -130,6 +133,7 @@ impl VersionManager {
         let pattern = format!(r"^{}\.[a-f0-9]{{8}}{}$", regex::escape(basename), regex::escape(ext));
         let re = Regex::new(&pattern)?;
 
+        let mut deleted_count = 0;
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let filename = entry.file_name().to_string_lossy().to_string();
@@ -145,9 +149,14 @@ impl VersionManager {
                         let old_file_path = std::path::Path::new(dir).join(&filename);
                         std::fs::remove_file(&old_file_path)?;
                         println!("    🗑️  已删除: {}", filename);
+                        deleted_count += 1;
                     }
                 }
             }
+        }
+
+        if self.debug_mode && deleted_count > 0 {
+            println!("  ✅ 共删除 {} 个旧文件", deleted_count);
         }
 
         Ok(())
@@ -178,14 +187,14 @@ impl VersionManager {
         };
 
         if std::path::Path::new(&new_path).exists() {
-            let existing_hash = self.calculate_file_hash(&new_path)?;
-            if existing_hash == hash {
-                if self.debug_mode {
-                    println!("  ⏭️  跳过（已存在）: {}", new_filename);
-                }
-                return Ok(info);
+            if self.debug_mode {
+                println!("  ⏭️  跳过（已存在）: {}", new_filename);
             }
-            std::fs::remove_file(&new_path)?;
+            // 删除旧的hash文件（排除当前hash）
+            let ext = std::path::Path::new(&clean_filename).extension().unwrap_or_default().to_string_lossy().to_string();
+            let basename = std::path::Path::new(&clean_filename).file_stem().unwrap().to_string_lossy().to_string();
+            self.find_and_delete_old_hash_files(&dir, &basename, &ext, &hash)?;
+            return Ok(info);
         }
 
         std::fs::copy(&source_path, &new_path)?;
@@ -232,31 +241,73 @@ impl VersionManager {
         Ok(images)
     }
 
+    // image_map 的 key 是原始CSS中的路径（如 ../images/pic.png），value 是新的带hash的文件名
     fn update_css_image_references(&self, css_path: &str, image_map: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
         let mut content = std::fs::read_to_string(css_path)?;
         let mut updated = false;
 
-        for (original_path, new_filename) in image_map {
-            let old_filename = std::path::Path::new(original_path).file_name().unwrap().to_string_lossy().to_string();
-            let clean_old_filename = self.remove_hash_from_filename(&old_filename);
+        // 匹配 url() 中的路径
+        let re = Regex::new(r#"url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)"#)?;
 
-            let pattern = format!(r#"url\(\s*(['"]?)\s*([^'")\s]*[/\\])?{}(?:\s*(['"]?)\s*\))"#, regex::escape(&clean_old_filename));
-            let re = Regex::new(&pattern)?;
+        content = re.replace_all(&content, |caps: &regex::Captures| -> String {
+            let opening_quote = &caps[1];
+            let original_path = &caps[2];
+            let closing_quote = &caps[3];
 
-            content = re.replace_all(&content, |caps: &regex::Captures| {
-                let opening_quote = &caps[1];
-                let path_prefix = &caps[2];
-                let closing_quote = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+            // 跳过绝对URL和data URI
+            if original_path.starts_with("http") || 
+               original_path.starts_with("data:") || 
+               original_path.starts_with("//") {
+                return caps[0].to_string();
+            }
 
-                let result = format!("url({}{}{}{})", opening_quote, path_prefix, new_filename, closing_quote);
+            // 移除查询字符串和hash用于匹配
+            let clean_path = original_path.split('?').next().unwrap_or(original_path).split('#').next().unwrap_or(original_path);
+            // 标准化路径分隔符为正斜杠进行比较
+            let normalized_path = clean_path.replace("\\", "/");
 
-                if &caps[0] != &result {
+            // 在 imageMap 中查找匹配的路径
+            let mut new_filename = None;
+            let mut found_key = None;
+            for (key, value) in image_map {
+                // 标准化 key 的路径分隔符
+                let normalized_key = key.replace("\\", "/");
+                // 精确匹配完整路径
+                if normalized_path == normalized_key {
+                    new_filename = Some(value);
+                    found_key = Some(key);
+                    break;
+                }
+            }
+
+            if let (Some(new_filename), Some(found_key)) = (new_filename, found_key) {
+                // 构建新路径：保持原有的目录结构，只替换文件名
+                let dir = std::path::Path::new(original_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or(".".to_string());
+                // 确保使用正斜杠
+                let dir = dir.replace("\\", "/");
+                let new_path = if dir == "." {
+                    new_filename.to_string()
+                } else {
+                    format!("{}/{}", dir, new_filename)
+                };
+
+                // 确保引号一致
+                let final_opening_quote = if !opening_quote.is_empty() { opening_quote } else { closing_quote };
+                let final_closing_quote = if !closing_quote.is_empty() { closing_quote } else { opening_quote };
+
+                let result = format!("url({}{}{})", final_opening_quote, new_path, final_closing_quote);
+                if caps[0] != result {
                     updated = true;
-                    println!("    🔄 {} -> {}", clean_old_filename, new_filename);
+                    let old_filename = std::path::Path::new(found_key).file_name().unwrap().to_string_lossy().to_string();
+                    println!("    🔄 {} -> {}", old_filename, new_filename);
                 }
                 result
-            }).to_string();
-        }
+            } else {
+                // 没有找到匹配项，保持原样
+                caps[0].to_string()
+            }
+        }).to_string();
+
 
         if updated {
             std::fs::write(css_path, content)?;
@@ -276,7 +327,7 @@ impl VersionManager {
         let ext = path.extension().unwrap_or_default().to_string_lossy().to_string();
         let name_without_ext = path.file_stem().unwrap().to_string_lossy().to_string();
 
-        let pattern = format!(r"^{}\.[a-f0-9]{{8}}\\{}$", regex::escape(&name_without_ext), regex::escape(&ext));
+        let pattern = format!(r"^{}\.[a-f0-9]{{8}}{}$", regex::escape(&name_without_ext), regex::escape(&ext));
         let re = Regex::new(&pattern).unwrap();
 
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -293,6 +344,7 @@ impl VersionManager {
         None
     }
 
+    // collectResourcesFromHTML 从HTML中收集所有资源引用（包括组件）
     fn collect_resources_from_html(&self, html_path: &str) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(html_path)?;
         let html_dir = std::path::Path::new(html_path).parent().unwrap().to_string_lossy().to_string();
@@ -300,18 +352,22 @@ impl VersionManager {
         resources.insert("css".to_string(), Vec::new());
         resources.insert("js".to_string(), Vec::new());
 
+        let content_str = content.as_str();
+        // 收集CSS文件（只收集components目录下的CSS，主CSS会单独处理）
         let css_re = Regex::new(r#"<link[^>]*href\s*=\s*['"]([^'"]+\.css)['"]"#)?;
-        for cap in css_re.captures_iter(&content) {
+        for cap in css_re.captures_iter(content_str) {
             let css_path = &cap[1];
 
             if css_path.starts_with("http") || css_path.starts_with("//") {
                 continue;
             }
 
+            // 只收集components目录下的CSS
             if !css_path.contains("components") {
                 continue;
             }
 
+            // 检查是否应该处理此组件
             if !self.should_process_component(css_path) {
                 if self.debug_mode {
                     println!("    🚫 跳过组件CSS: {} (不在处理列表中)", css_path);
@@ -331,8 +387,9 @@ impl VersionManager {
             }
         }
 
+        // 收集JS文件（只收集components目录下的JS，主JS会单独处理）
         let js_re = Regex::new(r#"<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]"#)?;
-        for cap in js_re.captures_iter(&content) {
+        for cap in js_re.captures_iter(content_str) {
             let js_path = &cap[1];
 
             if js_path.starts_with("http") || js_path.starts_with("//") {
@@ -420,20 +477,36 @@ impl VersionManager {
         }
 
         let images = self.collect_images_from_css(&original_css_path)?;
+        // imageMap 的 key 使用原始CSS中的相对路径，value 是新的带hash的文件名
         let mut image_map = HashMap::new();
 
         if !images.is_empty() {
             println!("    📸 处理 {} 个图片引用", images.len());
 
             for image in images {
+                // 使用原始路径作为key（标准化为正斜杠）
+                let original_path_key = image.original_path.replace("\\", "/");
                 let mut processed_files = self.processed_files.lock().unwrap();
                 if *processed_files.get(&image.absolute_path).unwrap_or(&false) {
                     drop(processed_files);
+                    // 查找已存在的带hash文件
                     let hash = self.calculate_file_hash(&image.absolute_path)?;
+                    // 找到实际的带hash文件
+                    let dir = std::path::Path::new(&image.absolute_path).parent().unwrap().to_string_lossy().to_string();
                     let old_image_filename = std::path::Path::new(&image.absolute_path).file_name().unwrap().to_string_lossy().to_string();
                     let clean_image_filename = self.remove_hash_from_filename(&old_image_filename);
                     let new_image_filename = self.add_hash_to_filename(&clean_image_filename, &hash);
-                    image_map.insert(image.original_path, new_image_filename);
+                    // 验证带hash的文件是否存在
+                    let hashed_path = std::path::Path::new(&dir).join(&new_image_filename);
+                    if hashed_path.exists() {
+                        image_map.insert(original_path_key, new_image_filename);
+                    } else {
+                        // 尝试查找任意带hash的版本
+                        if let Some(actual_hashed_file) = self.find_file(&std::path::Path::new(&dir).join(&clean_image_filename).to_string_lossy().to_string()) {
+                            let actual_hashed_filename = std::path::Path::new(&actual_hashed_file).file_name().unwrap().to_string_lossy().to_string();
+                            image_map.insert(original_path_key, actual_hashed_filename);
+                        }
+                    }
                     continue;
                 }
                 processed_files.insert(image.absolute_path.clone(), true);
@@ -442,11 +515,11 @@ impl VersionManager {
                 match self.rename_file_with_hash(&image.absolute_path) {
                     Ok(info) => {
                         let new_image_filename = std::path::Path::new(&info.hashed_path).file_name().unwrap().to_string_lossy().to_string();
-                        image_map.insert(image.original_path, new_image_filename);
-
-                        let rel_path = pathdiff::diff_paths(&image.absolute_path, &self.config.root_dir).unwrap_or_else(|| std::path::Path::new(&image.absolute_path).to_path_buf());
-                        let mut version_map = self.version_map.lock().unwrap();
-                        version_map.insert(rel_path.to_string_lossy().to_string(), info.hash);
+                        // 使用原始CSS中的路径作为key
+                        if self.debug_mode {
+                             println!("      📎 映射: {} -> {}", original_path_key, new_image_filename);
+                        }
+                        image_map.insert(original_path_key, new_image_filename);
                     },
                     Err(e) => {
                         println!("      ⚠️  失败: {} ({})", std::path::Path::new(&image.absolute_path).file_name().unwrap().to_string_lossy(), e);
@@ -455,6 +528,7 @@ impl VersionManager {
             }
         }
 
+        // 计算原始CSS的hash
         let original_hash = self.calculate_file_hash(&original_css_path)?;
         let hashed_css_filename = self.add_hash_to_filename(&clean_filename, &original_hash);
         let hashed_css_path = std::path::Path::new(&css_dir).join(&hashed_css_filename);
@@ -462,26 +536,32 @@ impl VersionManager {
 
         std::fs::copy(&original_css_path, &hashed_css_path_str)?;
 
+        // 更新hash版本CSS中的图片引用
         if !image_map.is_empty() {
+            if self.debug_mode {
+                println!("    📋 图片映射表 ({} 项):", image_map.len());
+                for (k, v) in &image_map {
+                     println!("      {} -> {}", k, v);
+                }
+            }
             self.update_css_image_references(&hashed_css_path_str, &image_map)?;
 
+            // 重新计算hash
             let new_hash = self.calculate_file_hash(&hashed_css_path_str)?;
             if new_hash != original_hash {
                 let final_css_filename = self.add_hash_to_filename(&clean_filename, &new_hash);
                 let final_css_path = std::path::Path::new(&css_dir).join(&final_css_filename);
                 let final_css_path_str = final_css_path.to_string_lossy().to_string();
                 
-                std::fs::rename(&hashed_css_path_str, &final_css_path_str)?;
+                if final_css_path_str != hashed_css_path_str {
+                    std::fs::rename(&hashed_css_path_str, &final_css_path_str)?;
+                }
             }
         }
 
         let css_ext = std::path::Path::new(&clean_filename).extension().unwrap_or_default().to_string_lossy().to_string();
         let css_basename = std::path::Path::new(&clean_filename).file_stem().unwrap().to_string_lossy().to_string();
         self.find_and_delete_old_hash_files(&css_dir, &css_basename, &css_ext, &original_hash)?;
-
-        let rel_path = pathdiff::diff_paths(&original_css_path, &self.config.root_dir).unwrap_or_else(|| std::path::Path::new(&original_css_path).to_path_buf());
-        let mut version_map = self.version_map.lock().unwrap();
-        version_map.insert(rel_path.to_string_lossy().to_string(), original_hash.clone());
 
         Ok(FileInfo {
             original_path: original_css_path,
@@ -500,46 +580,63 @@ impl VersionManager {
                 let escaped_path = regex::escape(original_rel_path);
                 let escaped_path = escaped_path.replace("/", r"[/\\]");
                 
-                let pattern = format!(r#"(<link[^>]*href\s*=\s*['"])({})(['"][^>]*>)"#, escaped_path);
-                let re = Regex::new(&pattern)?;
+                // 支持多种引用格式的正则表达式
+                let patterns = [
+                    format!(r#"(<link[^>]*href\s*=\s*['"])({})(['"][^>]*>)"#, escaped_path),
+                    format!(r#"(<link[^>]*href\s*=\s*['"])(\.{{1,2}}[/\\]{})(['"][^>]*>)"#, escaped_path),
+                ];
 
-                content = re.replace_all(&content, |caps: &regex::Captures| {
-                    let prefix = &caps[1];
-                    let old_path = &caps[2];
-                    let suffix = &caps[3];
+                let mut matched = false;
+                for pattern in &patterns {
+                    let re = Regex::new(pattern)?;
+                    if re.is_match(&content) {
+                        content = re.replace_all(&content, |caps: &regex::Captures| {
+                            let prefix = &caps[1];
+                            let old_path = &caps[2];
+                            let suffix = &caps[3];
 
-                    let old_dir = std::path::Path::new(old_path).parent().unwrap_or(std::path::Path::new("")).to_string_lossy().to_string();
-                    let new_filename = std::path::Path::new(new_hashed_path).file_name().unwrap().to_string_lossy().to_string();
+                            // 提取原始路径的目录部分
+                            let old_dir = std::path::Path::new(old_path).parent().unwrap_or(std::path::Path::new("")).to_string_lossy().to_string();
+                            let new_filename = std::path::Path::new(new_hashed_path).file_name().unwrap().to_string_lossy().to_string();
 
-                    let mut new_path = if !old_dir.is_empty() && old_dir != "." && old_dir != "/" {
-                        format!("{}/{}", old_dir, new_filename)
-                    } else {
-                        new_filename
-                    };
+                            // 构建新路径，保持原有的目录结构
+                            let mut new_path = if !old_dir.is_empty() && old_dir != "." && old_dir != "/" {
+                                format!("{}/{}", old_dir, new_filename)
+                            } else {
+                                new_filename
+                            };
 
-                    if old_path.starts_with("../") || old_path.starts_with("..\\") {
-                        if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
-                            new_path = format!("../{}", new_path);
-                        }
-                    } else if old_path.starts_with("./") || old_path.starts_with(".\\") {
-                        if !new_path.starts_with("./") && !new_path.starts_with(".\\") {
-                            new_path = format!("./{}", new_path);
-                        }
+                            // 如果原始路径是相对路径（以./或../开头），保持相对路径格式
+                            if old_path.starts_with("../") || old_path.starts_with("..\\") {
+                                if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
+                                    new_path = format!("../{}", new_path);
+                                }
+                            } else if old_path.starts_with("./") || old_path.starts_with(".\\") {
+                                if !new_path.starts_with("./") && !new_path.starts_with(".\\") {
+                                    new_path = format!("./{}", new_path);
+                                }
+                            }
+
+                            if !self.config.cdn_domain.is_empty() && !new_path.starts_with("http") {
+                                let clean_new_path = new_path.strip_prefix("./").unwrap_or(&new_path).strip_prefix("../").unwrap_or(&new_path);
+                                new_path = format!("{}/{}", self.config.cdn_domain, clean_new_path);
+                            }
+
+                            let result = format!("{}{}{}", prefix, new_path, suffix);
+
+                            if &caps[0] != &result {
+                                updated = true;
+                                matched = true;
+                                println!("  ✅ CSS: {} -> {}", std::path::Path::new(old_path).file_name().unwrap().to_string_lossy(), std::path::Path::new(&new_path).file_name().unwrap().to_string_lossy());
+                            }
+                            result
+                        }).to_string();
+                        if matched { break; }
                     }
-
-                    if !self.config.cdn_domain.is_empty() && !new_path.starts_with("http") {
-                        let clean_new_path = new_path.strip_prefix("./").unwrap_or(&new_path).strip_prefix("../").unwrap_or(&new_path);
-                        new_path = format!("{}/{}", self.config.cdn_domain, clean_new_path);
-                    }
-
-                    let result = format!("{}{}{}", prefix, new_path, suffix);
-
-                    if &caps[0] != &result {
-                        updated = true;
-                        println!("  ✅ CSS: {} -> {}", std::path::Path::new(old_path).file_name().unwrap().to_string_lossy(), std::path::Path::new(&new_path).file_name().unwrap().to_string_lossy());
-                    }
-                    result
-                }).to_string();
+                }
+                if !matched && self.debug_mode {
+                    println!("  ⚠️  未匹配CSS: {}", original_rel_path);
+                }
             }
         }
 
@@ -548,46 +645,59 @@ impl VersionManager {
                 let escaped_path = regex::escape(original_rel_path);
                 let escaped_path = escaped_path.replace("/", r"[/\\]");
                 
-                let pattern = format!(r#"(<script[^>]*src\s*=\s*['"])({})(['"][^>]*>)"#, escaped_path);
-                let re = Regex::new(&pattern)?;
+                let patterns = [
+                    format!(r#"(<script[^>]*src\s*=\s*['"])({})(['"][^>]*>)"#, escaped_path),
+                    format!(r#"(<script[^>]*src\s*=\s*['"])(\.{{1,2}}[/\\]{})(['"][^>]*>)"#, escaped_path),
+                ];
 
-                content = re.replace_all(&content, |caps: &regex::Captures| {
-                    let prefix = &caps[1];
-                    let old_path = &caps[2];
-                    let suffix = &caps[3];
+                let mut matched = false;
+                for pattern in &patterns {
+                    let re = Regex::new(pattern)?;
+                    if re.is_match(&content) {
+                        content = re.replace_all(&content, |caps: &regex::Captures| {
+                            let prefix = &caps[1];
+                            let old_path = &caps[2];
+                            let suffix = &caps[3];
 
-                    let old_dir = std::path::Path::new(old_path).parent().unwrap_or(std::path::Path::new("")).to_string_lossy().to_string();
-                    let new_filename = std::path::Path::new(new_hashed_path).file_name().unwrap().to_string_lossy().to_string();
+                            let old_dir = std::path::Path::new(old_path).parent().unwrap_or(std::path::Path::new("")).to_string_lossy().to_string();
+                            let new_filename = std::path::Path::new(new_hashed_path).file_name().unwrap().to_string_lossy().to_string();
 
-                    let mut new_path = if !old_dir.is_empty() && old_dir != "." && old_dir != "/" {
-                        format!("{}/{}", old_dir, new_filename)
-                    } else {
-                        new_filename
-                    };
+                            let mut new_path = if !old_dir.is_empty() && old_dir != "." && old_dir != "/" {
+                                format!("{}/{}", old_dir, new_filename)
+                            } else {
+                                new_filename
+                            };
 
-                    if old_path.starts_with("../") || old_path.starts_with("..\\") {
-                        if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
-                            new_path = format!("../{}", new_path);
-                        }
-                    } else if old_path.starts_with("./") || old_path.starts_with(".\\") {
-                        if !new_path.starts_with("./") && !new_path.starts_with(".\\") {
-                            new_path = format!("./{}", new_path);
-                        }
+                            if old_path.starts_with("../") || old_path.starts_with("..\\") {
+                                if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
+                                    new_path = format!("../{}", new_path);
+                                }
+                            } else if old_path.starts_with("./") || old_path.starts_with(".\\") {
+                                if !new_path.starts_with("./") && !new_path.starts_with(".\\") {
+                                    new_path = format!("./{}", new_path);
+                                }
+                            }
+
+                            if !self.config.cdn_domain.is_empty() && !new_path.starts_with("http") {
+                                let clean_new_path = new_path.strip_prefix("./").unwrap_or(&new_path).strip_prefix("../").unwrap_or(&new_path);
+                                new_path = format!("{}/{}", self.config.cdn_domain, clean_new_path);
+                            }
+
+                            let result = format!("{}{}{}", prefix, new_path, suffix);
+
+                            if &caps[0] != &result {
+                                updated = true;
+                                matched = true;
+                                println!("  ✅ JS: {} -> {}", std::path::Path::new(old_path).file_name().unwrap().to_string_lossy(), std::path::Path::new(&new_path).file_name().unwrap().to_string_lossy());
+                            }
+                            result
+                        }).to_string();
+                        if matched { break; }
                     }
-
-                    if !self.config.cdn_domain.is_empty() && !new_path.starts_with("http") {
-                        let clean_new_path = new_path.strip_prefix("./").unwrap_or(&new_path).strip_prefix("../").unwrap_or(&new_path);
-                        new_path = format!("{}/{}", self.config.cdn_domain, clean_new_path);
-                    }
-
-                    let result = format!("{}{}{}", prefix, new_path, suffix);
-
-                    if &caps[0] != &result {
-                        updated = true;
-                        println!("  ✅ JS: {} -> {}", std::path::Path::new(old_path).file_name().unwrap().to_string_lossy(), std::path::Path::new(&new_path).file_name().unwrap().to_string_lossy());
-                    }
-                    result
-                }).to_string();
+                }
+                if !matched && self.debug_mode {
+                    println!("  ⚠️  未匹配JS: {}", original_rel_path);
+                }
             }
         }
 
@@ -613,81 +723,106 @@ impl VersionManager {
         let html_dir = std::path::Path::new(html_path).parent().unwrap().to_string_lossy().to_string();
         let html_basename = std::path::Path::new(html_path).file_stem().unwrap().to_string_lossy().to_string();
 
+        // 判断是否需要处理主资源
+        let should_process_main = !self.config.process_main_resources.is_empty() &&
+            self.config.process_main_resources.iter().any(|name| {
+                name == std::path::Path::new(html_path).file_name().unwrap().to_string_lossy().as_ref() ||
+                name == &html_basename
+            });
+
+        if should_process_main {
+            println!("🎯 策略: 处理主资源 (JS/CSS) 及组件");
+        } else {
+            println!("🎯 策略: 仅处理组件资源 (跳过主JS/CSS)");
+        }
+
         let mut resources = HashMap::new();
         resources.insert("css".to_string(), HashMap::new());
         resources.insert("js".to_string(), HashMap::new());
 
-        println!("\n📦 处理主 JavaScript 文件...");
-        let js_paths = [
-            std::path::Path::new(&html_dir).join(format!("{}.js", html_basename)),
-            std::path::Path::new(&html_dir).join("js").join(format!("{}.js", html_basename)),
-            std::path::Path::new(&html_dir).join("scripts").join("js").join(format!("{}.js", html_basename)),
-        ];
+        // 1. 处理主JS文件
+        if should_process_main {
+            println!("\n📦 处理主 JavaScript 文件...");
+            let js_paths = [
+                std::path::Path::new(&html_dir).join(format!("{}.js", html_basename)),
+                std::path::Path::new(&html_dir).join("js").join(format!("{}.js", html_basename)),
+                std::path::Path::new(&html_dir).join("scripts").join("js").join(format!("{}.js", html_basename)),
+            ];
 
-        let mut main_js_found = false;
-        for js_path in &js_paths {
-            let js_path_str = js_path.to_string_lossy().to_string();
-            if let Some(actual_js_path) = self.find_file(&js_path_str) {
-                if let Ok(info) = self.rename_file_with_hash(&actual_js_path) {
-                    let rel_path = pathdiff::diff_paths(&actual_js_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&actual_js_path).to_path_buf());
-                    let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
+            let mut main_js_found = false;
+            for js_path in &js_paths {
+                let js_path_str = js_path.to_string_lossy().to_string();
+                if let Some(actual_js_path) = self.find_file(&js_path_str) {
+                    if let Ok(info) = self.rename_file_with_hash(&actual_js_path) {
+                        let rel_path = pathdiff::diff_paths(&actual_js_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&actual_js_path).to_path_buf());
+                        let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
 
-                    let hashed_rel_path = pathdiff::diff_paths(&info.hashed_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&info.hashed_path).to_path_buf());
-                    let hashed_rel_path_str = hashed_rel_path.to_string_lossy().replace('\\', "/");
+                        let hashed_rel_path = pathdiff::diff_paths(&info.hashed_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&info.hashed_path).to_path_buf());
+                        let hashed_rel_path_str = hashed_rel_path.to_string_lossy().replace('\\', "/");
 
-                    let normalized_key = rel_path_str.strip_prefix("./").unwrap_or(&rel_path_str).to_string();
-                    if let Some(js_map) = resources.get_mut("js") {
-                        js_map.insert(normalized_key, hashed_rel_path_str);
+                        let normalized_key = rel_path_str.strip_prefix("./").unwrap_or(&rel_path_str).to_string();
+                        if let Some(js_map) = resources.get_mut("js") {
+                            js_map.insert(normalized_key, hashed_rel_path_str);
+                        }
+
+                        main_js_found = true;
+                        break;
                     }
-
-                    main_js_found = true;
-                    break;
                 }
             }
+
+            if !main_js_found {
+                println!("  ℹ️  未找到主JS文件");
+            }
+        } else {
+            println!("\n📦 跳过主 JavaScript 文件");
         }
 
-        if !main_js_found {
-            println!("  ℹ️  未找到主JS文件");
-        }
+        // 2. 处理主CSS文件
+        if should_process_main {
+            println!("\n🎨 处理主 CSS 文件...");
+            let css_paths = [
+                std::path::Path::new(&html_dir).join(format!("{}.css", html_basename)),
+                std::path::Path::new(&html_dir).join("css").join(format!("{}.css", html_basename)),
+            ];
 
-        println!("\n🎨 处理主 CSS 文件...");
-        let css_paths = [
-            std::path::Path::new(&html_dir).join(format!("{}.css", html_basename)),
-            std::path::Path::new(&html_dir).join("css").join(format!("{}.css", html_basename)),
-        ];
+            let mut main_css_found = false;
+            for css_path in &css_paths {
+                let css_path_str = css_path.to_string_lossy().to_string();
+                if let Some(actual_css_path) = self.find_file(&css_path_str) {
+                    if let Ok(info) = self.process_component_css(&actual_css_path) {
+                        let rel_path = pathdiff::diff_paths(&actual_css_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&actual_css_path).to_path_buf());
+                        let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
 
-        let mut main_css_found = false;
-        for css_path in &css_paths {
-            let css_path_str = css_path.to_string_lossy().to_string();
-            if let Some(actual_css_path) = self.find_file(&css_path_str) {
-                if let Ok(info) = self.process_component_css(&actual_css_path) {
-                    let rel_path = pathdiff::diff_paths(&actual_css_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&actual_css_path).to_path_buf());
-                    let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
+                        let hashed_rel_path = pathdiff::diff_paths(&info.hashed_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&info.hashed_path).to_path_buf());
+                        let hashed_rel_path_str = hashed_rel_path.to_string_lossy().replace('\\', "/");
 
-                    let hashed_rel_path = pathdiff::diff_paths(&info.hashed_path, &html_dir).unwrap_or_else(|| std::path::Path::new(&info.hashed_path).to_path_buf());
-                    let hashed_rel_path_str = hashed_rel_path.to_string_lossy().replace('\\', "/");
+                        let normalized_key = rel_path_str.strip_prefix("./").unwrap_or(&rel_path_str).to_string();
+                        if let Some(css_map) = resources.get_mut("css") {
+                            css_map.insert(normalized_key, hashed_rel_path_str);
+                        }
 
-                    let normalized_key = rel_path_str.strip_prefix("./").unwrap_or(&rel_path_str).to_string();
-                    if let Some(css_map) = resources.get_mut("css") {
-                        css_map.insert(normalized_key, hashed_rel_path_str);
+                        main_css_found = true;
+                        break;
                     }
-
-                    main_css_found = true;
-                    break;
                 }
             }
+
+            if !main_css_found {
+                println!("  ℹ️  未找到主CSS文件");
+            }
+        } else {
+            println!("\n🎨 跳过主 CSS 文件");
         }
 
-        if !main_css_found {
-            println!("  ℹ️  未找到主CSS文件");
-        }
-
+        // 3. 收集并处理组件资源
         println!("\n🔍 扫描组件资源...");
         let html_resources = self.collect_resources_from_html(html_path)?;
         println!("  找到 {} 个组件CSS, {} 个组件JS", 
                  html_resources.get("css").map(|v| v.len()).unwrap_or(0),
                  html_resources.get("js").map(|v| v.len()).unwrap_or(0));
 
+        // 4. 处理组件JS文件
         if let Some(js_paths) = html_resources.get("js") {
             println!("\n🔧 处理组件 JavaScript 文件...");
             for js_rel_path in js_paths {
@@ -715,6 +850,7 @@ impl VersionManager {
             }
         }
 
+        // 5. 处理组件CSS文件
         if let Some(css_paths) = html_resources.get("css") {
             println!("\n🔧 处理组件 CSS 文件...");
             for css_rel_path in css_paths {
@@ -742,6 +878,7 @@ impl VersionManager {
             }
         }
 
+        // 6. 更新HTML中的引用
         println!("\n🔄 更新HTML中的资源引用...");
         println!("  📋 CSS: {} 项, JS: {} 项", 
                  resources.get("css").map(|m| m.len()).unwrap_or(0),
@@ -755,28 +892,19 @@ impl VersionManager {
 
     fn process_multiple_html_files(&self, html_paths: Vec<String>) {
         println!("🚀 开始批量处理HTML文件...\n");
-
         for html_path in html_paths {
             let absolute_path = std::path::Path::new(&self.config.root_dir).join(&html_path).to_string_lossy().to_string();
             if let Err(e) = self.process_html_file(&absolute_path) {
                 println!("❌ 处理失败 {}: {}", html_path, e);
             }
         }
-
-        self.save_version_map();
+        // 移除了 save_version_map() 调用
         println!("\n{}", "=".repeat(60));
         println!("🎉 全部处理完成！");
         println!("{}", "=".repeat(60));
     }
 
-    fn save_version_map(&self) {
-        let version_map = self.version_map.lock().unwrap();
-        if let Ok(json_data) = serde_json::to_string_pretty(&*version_map) {
-            if std::fs::write(".version-map.json", json_data).is_ok() {
-                println!("💾 版本映射已保存");
-            }
-        }
-    }
+    // 移除了 save_version_map 方法
 
     fn find_all_html_files(&self) -> Vec<String> {
         let mut html_files = Vec::new();
@@ -863,6 +991,8 @@ fn load_config(config_path: &str) -> Result<Config, Box<dyn std::error::Error>> 
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let start_time = Instant::now(); // 记录开始时间
+
     let args = Args::parse();
 
     let config = match load_config(&args.config) {
@@ -877,6 +1007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             home_html_file: String::new(),
             company_html_file: String::new(),
             include_components: Vec::new(),
+            process_main_resources: Vec::new(), // 新增
         },
     };
 
@@ -904,7 +1035,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(html_file) = target_html_file {
         vm.process_html_file(&html_file)?;
-        vm.save_version_map();
+        // 移除了 vm.save_version_map();
+        let duration = start_time.elapsed();
+        println!("\n⏱️  总运行时间: {:.2?}", duration);
         return Ok(());
     }
 
@@ -916,14 +1049,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!("❌ 未找到HTML文件");
         }
+        let duration = start_time.elapsed();
+        println!("\n⏱️  总运行时间: {:.2?}", duration);
         return Ok(());
     }
 
     if !vm.config.html_files.is_empty() {
         vm.process_multiple_html_files(vm.config.html_files.clone());
+        let duration = start_time.elapsed();
+        println!("\n⏱️  总运行时间: {:.2?}", duration);
     } else {
         println!("⚠️  未指定要处理的HTML文件");
         println!("使用 --file 指定文件, --all 扫描所有, 或在配置文件中指定");
+        let duration = start_time.elapsed();
+        println!("\n⏱️  总运行时间: {:.2?}", duration);
     }
 
     Ok(())
