@@ -2,7 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use clap::{Parser};
 use image::io::Reader as ImageReader;
-use std::io::{self, Read, Write};
 
 // ================== 配置常量 ==================
 const HOME_SOURCE_PATH: &str = "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap";
