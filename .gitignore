@@ -65,3 +65,9 @@ logs/
 **/hiberfil.sys
 **/pagefile.sys
 **/swapfile
+# exe
+**/*.exe
+# target
+**/target/
+# pdb
+**/*.pdb
