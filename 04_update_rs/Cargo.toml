@@ -7,3 +7,4 @@ edition = "2021"
 clap = { version = "4.0", features = ["derive"] }
 image = "0.24"
 anyhow = "1.0"
+console = "0.15"

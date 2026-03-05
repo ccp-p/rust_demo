@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use clap::{Parser};
 use image::io::Reader as ImageReader;
+use std::io::{self, Read, Write};
 
 // ================== 配置常量 ==================
 const HOME_SOURCE_PATH: &str = "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap";
@@ -46,9 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let info = prepare_resource_info(&path, &name, &base_path)?;
         if let Some(info) = info {
+            println!("[命中] 文件: {} ({}x{}), Category: {}", info.file_name, info.width, info.height, info.category);
             let css_path = info.css_path.to_string_lossy().to_string();
             css_groups.entry(css_path).or_insert_with(Vec::new).push(info);
             count += 1;
+        } else {
+            println!("[跳过] 文件: {}", name);
         }
     }
 
@@ -56,8 +60,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (css_path, infos) in css_groups {
         update_batch(&css_path, &infos, &base_path)?;
     }
+  // 阻止窗口立即关闭
+  
+  println!("[完成] 共处理 {} 个文件。", count);
 
-    println!("[完成] 共处理 {} 个文件。", count);
+  println!("处理完成，按下任意键（例如空格）退出...");
+    console::Term::stdout().read_key()?;
+    
+   
 
     Ok(())
 }
@@ -97,6 +107,8 @@ fn prepare_resource_info(
         file_path: file_path.clone(),
         file_name: file_name.to_string(),
         name_only,
+        width,
+        height,
         category: category.to_string(),
         target_dir,
         css_path,
@@ -207,6 +219,8 @@ struct ResourceInfo {
     file_path: PathBuf,
     file_name: String,
     name_only: String,
+    width: u32,
+    height: u32,
     category: String,
     target_dir: PathBuf,
     css_path: PathBuf,
