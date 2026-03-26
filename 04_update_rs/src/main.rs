@@ -167,7 +167,12 @@ fn update_batch(css_path: &str, infos: &[ResourceInfo], _base_path: &PathBuf) ->
         fs::copy(&info.file_path, &target_path)?;
         fs::remove_file(&info.file_path)?;
 
-        if current_content.contains(&info.name_only) {
+        let selector_line = info.css_content.lines()
+            .find(|l| l.contains('{'))
+            .unwrap_or(&info.name_only);
+        let check_str = selector_line.split('{').next().unwrap_or(selector_line).trim();
+
+        if current_content.contains(check_str) {
             continue;
         }
 
